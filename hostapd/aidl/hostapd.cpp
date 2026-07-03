@@ -647,7 +647,16 @@ std::string CreateHostapdConfig(
 	int32_t sec_channel = 0;
 	enum oper_chan_width chanwidth = CONF_OPER_CHWIDTH_USE_HT;
 	std::string ht_cap_vht_oper_he_oper_eht_oper_chwidth_as_string;
-	switch (iface_params.hwModeParams.maximumChannelBandwidth) {
+	/* BCM4358 tops out at VHT80 for 5GHz SoftAp; clamp wider (AUTO/160/320)
+	 * requests down to 80MHz. 2.4GHz/6GHz untouched. */
+	ChannelBandwidth max_cbw = iface_params.hwModeParams.maximumChannelBandwidth;
+	if ((band & band5Ghz) && !(band & band6Ghz) &&
+	    max_cbw != ChannelBandwidth::BANDWIDTH_20 &&
+	    max_cbw != ChannelBandwidth::BANDWIDTH_40 &&
+	    max_cbw != ChannelBandwidth::BANDWIDTH_80) {
+		max_cbw = ChannelBandwidth::BANDWIDTH_80;
+	}
+	switch (max_cbw) {
 	case ChannelBandwidth::BANDWIDTH_20:
 		ht_cap_vht_oper_he_oper_eht_oper_chwidth_as_string = StringPrintf(
 #ifdef CONFIG_IEEE80211BE
@@ -803,6 +812,20 @@ std::string CreateHostapdConfig(
 				sec_channel = -1;
 			}
 		}
+		/* 5GHz HT40: derive the secondary direction (HT40-/HT40+) from the primary
+		 * channel; hardcoded [HT40+] put ch48's secondary on DFS ch52 and failed. */
+		if ((band & band5Ghz) && !(band & band6Ghz) && sec_channel != 0 &&
+		    channelParams.channel >= 36) {
+			if (((channelParams.channel - 36) / 4) % 2 != 0) {
+				sec_channel = -1;
+				size_t ht40_pos =
+				    ht_cap_vht_oper_he_oper_eht_oper_chwidth_as_string.find("[HT40+]");
+				if (ht40_pos != std::string::npos) {
+					ht_cap_vht_oper_he_oper_eht_oper_chwidth_as_string.replace(
+						ht40_pos, 7, "[HT40-]");
+				}
+			}
+		}
 		mode = ieee80211_freq_to_channel_ext(freq, sec_channel, chanwidth, &op_class,
 						     &chan);
 		if (mode == NUM_HOSTAPD_MODES) {
@@ -834,6 +857,12 @@ std::string CreateHostapdConfig(
 			}
 #endif /* CONFIG_IEEE80211BE */
 		}
+	}
+
+	/* bcmdhd rejects the HT40 OBSS coexistence scan with -EINVAL and aborts the
+	 * 5GHz SoftAp; skip it when a secondary channel is used (needs no_pri_sec_switch). */
+	if (sec_channel != 0) {
+		ht_cap_vht_oper_he_oper_eht_oper_chwidth_as_string += "no_pri_sec_switch=1\n";
 	}
 
 #ifdef CONFIG_INTERWORKING
